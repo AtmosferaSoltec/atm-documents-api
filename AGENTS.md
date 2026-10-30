@@ -26,7 +26,11 @@ Other services:
 ## Stack
 
 - Go (version in `go.mod`). Standard library first (`net/http`, `log/slog`).
-- PDF rendering is isolated behind an interface so the engine can be replaced. Engine and third-party libraries are added only when the standard library is not reasonable; tell the user why.
+- PDF rendering is native Go. NO headless browser (no Chromium, chromedp, or HTML-to-PDF): it keeps the image small (about 35 MB) and removes the SSRF and file-read surface. Library: `go-pdf/fpdf` (maintained fork of gofpdf; the original is archived), used directly because the templates need exact control (rounded boxes, bands, absolute footers, custom page sizes). Other libraries are added only when needed (for example `boombuler/barcode` for QR and Code128 once a template needs them); check the current maintenance status and version first, and tell the user why.
+- PDF rendering is isolated behind the `Renderer` interface of the feature, so the engine can be replaced. Nothing outside `internal/renderer/` imports the PDF library.
+- Fonts: the built-in Helvetica (Windows-1252), so no font file ships. It covers Spanish accents, `ñ`, `¡`, `¿` and `·`; other characters print as a replacement. If a template ever needs wider Unicode coverage, embed a TTF with `go:embed` instead of relying on system fonts.
+- Paper formats: A4 and the 80 mm ticket. A template declares its formats; callers choose only among them, never an arbitrary size. A 58 mm ticket is added when a client needs it.
+- Layout is drawn in points. Keep measures as named constants and measure text with the canvas helpers before drawing, so a long value wraps instead of overflowing.
 - PostgreSQL (pgx + goose migrations in `migrations/`) only if templates, versions, or generation history need to be persisted. Do not add it before it is needed.
 
 ## Architecture: package by feature, lightweight hexagonal
@@ -36,14 +40,13 @@ cmd/api/              entry point: wiring only, no business logic
 migrations/           numbered .sql files (only if a database is used)
 internal/
   config/             environment configuration
-  httpx/              shared HTTP middlewares and helpers
-  auth/               token verification middleware
-  server/             route registration, wires the features together
-  platform/           database connection, clock, id generation
-  template/           document templates and versions
-  document/           generation use cases (render, store, fetch)
-  renderer/           PDF engine adapter(s); the ONLY place importing the PDF library
+  auth/               service-token verification middleware
+  platform/httpserver/   error envelope, X-Request-ID
+  salesnote/          feature: internal sales note (model, service, handler, formats, amount in words)
+  renderer/           PDF layouts (A4, ticket); the ONLY place importing the PDF library
 ```
+
+One feature per document type (`salesnote/` today; for example `contract/` later). Each defines its own `Renderer` interface and its own endpoint `POST /v1/documents/<type>`. Do not build a generic template engine until a third document type shows what is really shared.
 
 Each feature folder contains:
 
@@ -83,8 +86,10 @@ Keep it simple. Do not add layers, generic base types, or abstractions until a s
 - Never log JWTs, signed URLs, or the payload of a document. Payloads contain personal and financial data.
 - Never commit secrets. `.env`, `*.pem`, and `*.key` are git-ignored.
 - Validate the payload against the template's schema before rendering. Reject unknown templates and oversized payloads.
-- Templates are trusted code owned by this repo, never accepted from callers. Never render caller-supplied HTML, URLs, or fonts; do not fetch remote resources during rendering (prevents SSRF and file reads).
-- Enforce limits: payload size, page count, and render timeout.
+- Templates are trusted code owned by this repo, never accepted from callers. Never accept caller-supplied layouts, fonts, or file paths.
+- Do not fetch remote resources while rendering. Logos and images arrive as bytes or as an object reference resolved through ATM-Storage-API, never as an arbitrary URL. Validate image type and size before decoding.
+- QR and barcode content is data from the payload, encoded by the renderer. Links in a document are written as plain text or PDF link annotations; validate their scheme (`https` only).
+- Enforce limits: payload size, number of items/rows, page count, image size, and render timeout.
 - Company IDs are global auth tenant UUIDs, taken from the token and never from the body. Verify authorization on every operation.
 - All SQL uses parameters. Never build SQL with string concatenation.
 - Separate development and production credentials and databases.
@@ -99,6 +104,7 @@ Keep it simple. Do not add layers, generic base types, or abstractions until a s
 
 - Every use case has tests. Services are tested with in-memory fakes of their interfaces. `postgres.go` is tested against a real PostgreSQL, and only against explicit test databases.
 - Renderer tests check structure (valid PDF, page count, extracted text), not byte equality.
+- Layout is defined in code, so every new or changed template is checked visually: render a sample PDF, convert it to an image (for example with `pdftoppm`), and look at it before declaring the template done. Keep sample payloads next to the template tests.
 - Before finishing any task, all of these must pass: `gofmt -l .` (no output), `go vet ./...`, and `go test ./... -race`.
 - Fix the cause of a failing test. Never delete or weaken a test to make it pass.
 

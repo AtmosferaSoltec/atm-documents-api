@@ -1,0 +1,40 @@
+# Production stack. Copied to /opt/documents-api by GitHub Actions on every deploy;
+# never edited by hand on the server.
+#
+# It never builds: the image is built once in CI and published to GHCR.
+# The real .env lives only on the server (/opt/documents-api/.env).
+#
+# No database and no migrations: the service stores nothing. Other backends reach
+# it through the external network `atm-network` as http://documents-api:8085.
+
+networks:
+  shared:
+    name: atm-network
+    external: true
+
+services:
+  app:
+    image: ghcr.io/atmosferasoltec/atm-documents-api:${IMAGE_TAG:-latest}
+    container_name: documents-api
+    env_file: .env
+    environment:
+      APP_ENV: production
+      HTTP_PORT: "8085"
+    # Loopback only: the host nginx (documents.atmosferast.com) is what publishes it.
+    ports:
+      - "127.0.0.1:3133:8085"
+    networks:
+      - shared
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8085/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # PDFs are built in memory and never touch the disk.
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    # MAX_CONCURRENT_RENDERS (4) renders at once, each decoding a logo of up to 8 MP.
+    mem_limit: 384m
