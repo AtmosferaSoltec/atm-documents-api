@@ -46,3 +46,7 @@ go.work.sum
 .vscode/
 *.swp
 *.swo
+
+# Generated documents (local output)
+/out/
+/output/

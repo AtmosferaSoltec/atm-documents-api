@@ -1,0 +1,15 @@
+# Secrets and local state must never reach the image.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.git
+.github
+.gitignore
+*.md
+docker-compose.yml
+deploy
+bin
+tmp
+out
