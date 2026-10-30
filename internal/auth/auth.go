@@ -11,7 +11,10 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const roleService = "service"
+const (
+	roleService    = "service"
+	roleSuperadmin = "superadmin"
+)
 
 // Claims are the atm-auth-api access token claims this service reads.
 type Claims struct {
@@ -21,14 +24,14 @@ type Claims struct {
 	System string `json:"system"`
 }
 
-// Verifier validates atm-auth-api service tokens locally with the public key.
+// Verifier validates atm-auth-api tokens locally with the public key.
 type Verifier struct {
 	key     *rsa.PublicKey
 	issuer  string
 	systems map[string]bool
 }
 
-// New builds a Verifier. Only the listed systems may call the service.
+// New builds a Verifier. Only the listed systems may render documents.
 func New(publicKeyBase64, issuer string, allowedSystems []string) (*Verifier, error) {
 	data, err := base64.StdEncoding.DecodeString(publicKeyBase64)
 	if err != nil {
@@ -45,8 +48,7 @@ func New(publicKeyBase64, issuer string, allowedSystems []string) (*Verifier, er
 	return &Verifier{key: key, issuer: issuer, systems: systems}, nil
 }
 
-// Verify checks signature, issuer, expiry and that the token is a service
-// token of an allowed system.
+// Verify checks signature, issuer and expiry, whatever the role.
 func (v *Verifier) Verify(raw string) (Claims, error) {
 	var claims Claims
 	_, err := jwt.ParseWithClaims(raw, &claims,
@@ -56,17 +58,25 @@ func (v *Verifier) Verify(raw string) (Claims, error) {
 		jwt.WithExpirationRequired(),
 		jwt.WithIssuedAt(),
 	)
-	if err != nil || claims.Subject == "" || claims.IssuedAt == nil || claims.Role != roleService {
+	if err != nil || claims.Subject == "" || claims.IssuedAt == nil || claims.Role == "" {
 		return Claims{}, errors.New("invalid access token")
-	}
-	if !v.systems[claims.System] {
-		return Claims{}, errors.New("system not allowed")
 	}
 	return claims, nil
 }
 
-// Middleware rejects requests without a valid service token.
-func (v *Verifier) Middleware() gin.HandlerFunc {
+// Service admits the service token of an allowed system: the backends that render documents.
+func (v *Verifier) Service() gin.HandlerFunc {
+	return v.guard(func(c Claims) bool { return c.Role == roleService && v.systems[c.System] })
+}
+
+// Superadmin admits the owner's token: the console that manages this service.
+func (v *Verifier) Superadmin() gin.HandlerFunc {
+	return v.guard(func(c Claims) bool { return c.Role == roleSuperadmin })
+}
+
+// guard answers 401 for a missing or invalid token and 403 for a valid token
+// the route does not admit.
+func (v *Verifier) guard(allowed func(Claims) bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		parts := strings.Fields(c.GetHeader("Authorization"))
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
@@ -76,6 +86,10 @@ func (v *Verifier) Middleware() gin.HandlerFunc {
 		claims, err := v.Verify(parts[1])
 		if err != nil {
 			httpserver.Error(c, 401, "unauthorized", "Missing or invalid access token.")
+			return
+		}
+		if !allowed(claims) {
+			httpserver.Error(c, 403, "forbidden", "This token cannot use this route.")
 			return
 		}
 		c.Set("auth_claims", claims)

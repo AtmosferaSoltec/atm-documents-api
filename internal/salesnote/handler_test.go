@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AtmosferaSoltec/atm-documents-api/internal/activity"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/auth"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/platform/httpserver"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/renderer"
@@ -26,8 +27,9 @@ import (
 const issuer = "atm-auth-test"
 
 type env struct {
-	engine *gin.Engine
-	key    *rsa.PrivateKey
+	engine   *gin.Engine
+	key      *rsa.PrivateKey
+	recorder *activity.Recorder
 }
 
 func newEnv(t *testing.T) env {
@@ -49,9 +51,10 @@ func newEnv(t *testing.T) env {
 	engine := gin.New()
 	engine.Use(httpserver.RequestID())
 	service := salesnote.NewService(renderer.New(), 2)
-	handler := salesnote.NewHandler(service, 10*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	salesnote.RegisterRoutes(engine.Group("/v1", verifier.Middleware()), handler)
-	return env{engine: engine, key: key}
+	recorder := activity.New()
+	handler := salesnote.NewHandler(service, recorder, 10*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	salesnote.RegisterRoutes(engine.Group("/v1", verifier.Service()), handler)
+	return env{engine: engine, key: key, recorder: recorder}
 }
 
 func (e env) token(t *testing.T, role, system string, expiresIn time.Duration, signer *rsa.PrivateKey) string {
@@ -126,13 +129,10 @@ func TestRejectsMissingOrBadTokens(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]string{
-		"no token":         "",
-		"garbage":          "not-a-jwt",
-		"wrong signer":     e.token(t, "service", "lavendimia", time.Minute, other),
-		"expired":          e.token(t, "service", "lavendimia", -time.Minute, nil),
-		"user role":        e.token(t, "user", "lavendimia", time.Minute, nil),
-		"superadmin":       e.token(t, "superadmin", "lavendimia", time.Minute, nil),
-		"system not allow": e.token(t, "service", "olympus", time.Minute, nil),
+		"no token":     "",
+		"garbage":      "not-a-jwt",
+		"wrong signer": e.token(t, "service", "lavendimia", time.Minute, other),
+		"expired":      e.token(t, "service", "lavendimia", -time.Minute, nil),
 	}
 	for name, token := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -141,6 +141,46 @@ func TestRejectsMissingOrBadTokens(t *testing.T) {
 				t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestForbidsValidTokensThatAreNotAllowedSystems(t *testing.T) {
+	e := newEnv(t)
+	cases := map[string]string{
+		"user role":          e.token(t, "user", "lavendimia", time.Minute, nil),
+		"superadmin":         e.token(t, "superadmin", "", time.Minute, nil),
+		"system not allowed": e.token(t, "service", "olympus", time.Minute, nil),
+	}
+	for name, token := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec := e.post(t, token, validBody)
+			if rec.Code != http.StatusForbidden || errorCode(t, rec) != "forbidden" {
+				t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestRecordsActivityWithoutContent(t *testing.T) {
+	e := newEnv(t)
+	token := e.token(t, "service", "lavendimia", time.Minute, nil)
+	e.post(t, token, validBody)
+	e.post(t, token, strings.Replace(validBody, `"a4"`, `"a3"`, 1))
+	e.post(t, token, "nope")
+
+	s := e.recorder.Snapshot()
+	if s.Totals.OK != 1 || s.Totals.Invalid != 2 {
+		t.Fatalf("totals = %+v", s.Totals)
+	}
+	newest, oldest := s.Recent[0], s.Recent[2]
+	if oldest.Outcome != activity.OutcomeOK || oldest.System != "lavendimia" || oldest.Format != "a4" || oldest.Items != 1 || oldest.Bytes == 0 {
+		t.Fatalf("ok event = %+v", oldest)
+	}
+	if newest.Format != "" || newest.Items != 0 {
+		t.Fatalf("a body that is not JSON must record no format or items: %+v", newest)
+	}
+	if s.Recent[1].Format != "" {
+		t.Fatalf("an unknown format must not be recorded: %+v", s.Recent[1])
 	}
 }
 

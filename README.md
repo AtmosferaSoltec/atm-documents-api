@@ -47,7 +47,14 @@ go run ./cmd/api serve
 
 ## Authentication
 
-Every `/v1` route needs `Authorization: Bearer <service token>`. A system's backend gets it from atm-auth-api `POST /v1/token` with its client secret. The token must be RS256, from the configured issuer, unexpired, with `role: service` and a `system` listed in `ALLOWED_SYSTEMS`. User and superadmin tokens are rejected. The service validates tokens locally and never calls auth-api.
+Every `/v1` route needs `Authorization: Bearer <token>`, RS256, from the configured issuer and unexpired. The service validates tokens locally and never calls auth-api.
+
+| Routes | Token | Otherwise |
+|---|---|---|
+| `/v1/documents/*` | Service token (`role: service`) of a system listed in `ALLOWED_SYSTEMS`. A backend gets it from atm-auth-api `POST /v1/token` with its client secret | 403 for a user or superadmin token, or a system not listed |
+| `/v1/admin/*` | Superadmin token (`role: superadmin`): the console | 403 for a service or user token |
+
+A missing, malformed, expired or wrongly signed token is always 401.
 
 ## API
 
@@ -55,7 +62,10 @@ Every `/v1` route needs `Authorization: Bearer <service token>`. A system's back
 |---|---|---|
 | GET | `/health` | Liveness |
 | GET | `/ready` | Readiness (no external dependencies: ready when running) |
-| POST | `/v1/documents/sales-note` | Render a sales note; responds `application/pdf` |
+| POST | `/v1/documents/sales-note` | Render a sales note; responds `application/pdf` (service token) |
+| GET | `/v1/admin/templates` | Catalog of document types, their formats and limits, and the service settings (superadmin) |
+| GET | `/v1/admin/templates/{code}/preview?format=a4\|ticket` | The template rendered with fictional data, as `application/pdf` (superadmin) |
+| GET | `/v1/admin/activity` | What the service rendered since it started (superadmin) |
 
 ### `POST /v1/documents/sales-note`
 
@@ -111,9 +121,19 @@ Response headers: `Content-Type: application/pdf`, `Content-Disposition: inline;
 | 500 | `render_failed` | Unexpected rendering error |
 | 503 | `service_busy` | No render slot freed up before the timeout |
 
+### Management routes
+
+They exist for the console (`Documentos > Plantillas` and `Actividad`).
+
+- **Catalog**: templates are code in this repository, so the catalog is a fixed list; it cannot be edited through the API. Each entry has its code, name, endpoint, paper formats and limits. The response also carries the service settings (environment, allowed systems, render slots, timeout).
+- **Preview**: renders the template with a built-in fictional note, so the console never sends or stores a real document. Previews do not count as activity. Errors: `404 template_not_found`, `422 invalid_format`.
+- **Activity**: in-memory counters since the process started: totals by outcome (`ok`, `invalid`, `busy`, `error`), the same by system and by format, the average duration of successful renders, and the last 50 requests. The counters reset on every restart and deploy. Each event holds only time, system, format, item count, size, duration and outcome.
+
+The console reaches the service on its own origin under `/documents-api/` (host nginx forwards it to `127.0.0.1:3133`), so no CORS is needed. See [deploy/host-nginx/console-documents-api.location](deploy/host-nginx/console-documents-api.location).
+
 ## Privacy
 
-Payloads hold personal and financial data. The service logs only request id, system, format, item count, size and duration. It never logs payloads, tokens or documents, and stores nothing.
+Payloads hold personal and financial data. The service logs only request id, system, format, item count, size and duration. It never logs payloads, tokens or documents, and stores nothing. The activity log keeps the same metadata in memory only.
 
 ## Quality
 
@@ -149,7 +169,7 @@ On the server (already prepared):
 | Public site | `https://documents.atmosferast.com` via host nginx, wildcard certificate `/etc/ssl/atmosferast/origin.pem` |
 | Internal URL | `http://documents-api:8085` on the `atm-network` Docker network |
 
-The nginx site is versioned in [deploy/host-nginx/documents.atmosferast.com](deploy/host-nginx/documents.atmosferast.com); it is installed once in `/etc/nginx/sites-available` and linked from `sites-enabled`. The production `.env` carries the same `AUTH_PUBLIC_KEY_BASE64` and `AUTH_ISSUER` as storage-api. To let another system call this service, add its code to `ALLOWED_SYSTEMS` in that file and restart the container.
+The nginx site is versioned in [deploy/host-nginx/documents.atmosferast.com](deploy/host-nginx/documents.atmosferast.com); it is installed once in `/etc/nginx/sites-available` and linked from `sites-enabled`. The console needs one more block, [console-documents-api.location](deploy/host-nginx/console-documents-api.location), added by hand inside the `server` block of `/etc/nginx/sites-available/console.atmosferast.com` before `location /` (then `nginx -t && systemctl reload nginx`). The production `.env` carries the same `AUTH_PUBLIC_KEY_BASE64` and `AUTH_ISSUER` as storage-api. To let another system call this service, add its code to `ALLOWED_SYSTEMS` in that file and restart the container.
 
 Backends on the same Docker network should call `http://documents-api:8085`; the public domain exists for tools and external callers.
 

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/AtmosferaSoltec/atm-documents-api/internal/activity"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/auth"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/platform/httpserver"
 	"github.com/gin-gonic/gin"
@@ -59,16 +60,25 @@ type request struct {
 	IsTest        bool            `json:"is_test"`
 }
 
+// TemplateCode identifies this document type in routes and in the activity log.
+const TemplateCode = "sales-note"
+
+// ActivityRecorder receives one event per render request.
+type ActivityRecorder interface {
+	Record(activity.Event)
+}
+
 // Handler serves the sales note endpoint.
 type Handler struct {
-	service *Service
-	timeout time.Duration
-	logger  *slog.Logger
+	service  *Service
+	recorder ActivityRecorder
+	timeout  time.Duration
+	logger   *slog.Logger
 }
 
 // NewHandler builds the HTTP handler. timeout bounds one request end to end.
-func NewHandler(service *Service, timeout time.Duration, logger *slog.Logger) *Handler {
-	return &Handler{service: service, timeout: timeout, logger: logger}
+func NewHandler(service *Service, recorder ActivityRecorder, timeout time.Duration, logger *slog.Logger) *Handler {
+	return &Handler{service: service, recorder: recorder, timeout: timeout, logger: logger}
 }
 
 // RegisterRoutes mounts the endpoint on an already authenticated group.
@@ -77,11 +87,24 @@ func RegisterRoutes(group *gin.RouterGroup, h *Handler) {
 }
 
 func (h *Handler) create(c *gin.Context) {
+	started := time.Now()
+	system := auth.FromContext(c).System
+	format, items := "", 0
+	// Only metadata is recorded, and only the formats this service knows: a
+	// caller-supplied string must not grow the breakdown without bound.
+	record := func(outcome activity.Outcome, size int) {
+		h.recorder.Record(activity.Event{
+			System: system, Template: TemplateCode, Format: format, Items: items, Bytes: size,
+			DurationMS: time.Since(started).Milliseconds(), Outcome: outcome,
+		})
+	}
+
 	body := http.MaxBytesReader(c.Writer, c.Request.Body, MaxBodyBytes)
 	decoder := json.NewDecoder(body)
 	decoder.DisallowUnknownFields()
 	var req request
 	if err := decoder.Decode(&req); err != nil {
+		record(activity.OutcomeInvalid, 0)
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			httpserver.Error(c, http.StatusRequestEntityTooLarge, CodePayloadTooLarge, "Request body is too large.")
@@ -90,37 +113,46 @@ func (h *Handler) create(c *gin.Context) {
 		httpserver.Error(c, http.StatusBadRequest, CodeInvalidRequest, "Request body must be valid JSON with known fields.")
 		return
 	}
+	if f := Format(req.Format); f == FormatA4 || f == FormatTicket {
+		format = req.Format
+	}
+	items = len(req.Items)
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		record(activity.OutcomeInvalid, 0)
 		httpserver.Error(c, http.StatusBadRequest, CodeInvalidRequest, "Request body must contain a single JSON object.")
 		return
 	}
 	note, err := req.toNote()
 	if err != nil {
+		record(activity.OutcomeInvalid, 0)
 		httpserver.Error(c, http.StatusUnprocessableEntity, CodeInvalidPayload, err.Error())
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), h.timeout)
 	defer cancel()
-	started := time.Now()
 	pdf, err := h.service.Render(ctx, note)
 	var validation *ValidationError
 	switch {
 	case errors.As(err, &validation):
+		record(activity.OutcomeInvalid, 0)
 		httpserver.Error(c, http.StatusUnprocessableEntity, CodeInvalidPayload, validation.Error())
 		return
 	case errors.Is(err, ErrBusy):
+		record(activity.OutcomeBusy, 0)
 		httpserver.Error(c, http.StatusServiceUnavailable, CodeBusy, "The service is busy. Try again shortly.")
 		return
 	case err != nil:
+		record(activity.OutcomeError, 0)
 		// The payload holds personal and financial data, so only metadata is logged.
 		h.logger.Error("sales note render failed", "request_id", c.GetHeader("X-Request-ID"), "format", note.Format, "error", err.Error())
 		httpserver.Error(c, http.StatusInternalServerError, CodeRenderFailed, "Unable to render the document.")
 		return
 	}
+	record(activity.OutcomeOK, len(pdf))
 	h.logger.Info("sales note rendered",
 		"request_id", c.GetHeader("X-Request-ID"),
-		"system", auth.FromContext(c).System,
+		"system", system,
 		"format", note.Format,
 		"items", len(note.Items),
 		"bytes", len(pdf),

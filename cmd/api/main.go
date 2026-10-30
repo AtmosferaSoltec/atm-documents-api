@@ -11,7 +11,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AtmosferaSoltec/atm-documents-api/internal/activity"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/auth"
+	"github.com/AtmosferaSoltec/atm-documents-api/internal/catalog"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/config"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/platform/httpserver"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/renderer"
@@ -48,7 +50,14 @@ func run(ctx context.Context, logger *slog.Logger, args []string) error {
 	}
 
 	service := salesnote.NewService(renderer.New(), cfg.MaxConcurrentRenders)
-	handler := salesnote.NewHandler(service, cfg.RenderTimeout, logger)
+	recorder := activity.New()
+	handler := salesnote.NewHandler(service, recorder, cfg.RenderTimeout, logger)
+	admin := catalog.NewHandler(service, recorder, catalog.Settings{
+		Environment:          cfg.Environment,
+		AllowedSystems:       cfg.AllowedSystems,
+		MaxConcurrentRenders: cfg.MaxConcurrentRenders,
+		RenderTimeout:        cfg.RenderTimeout,
+	}, logger)
 
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
@@ -72,7 +81,10 @@ func run(ctx context.Context, logger *slog.Logger, args []string) error {
 	engine.GET("/health", func(c *gin.Context) { c.JSON(200, statusResponse{Status: "ok"}) })
 	// The service holds no database or remote dependency: when it runs, it is ready.
 	engine.GET("/ready", func(c *gin.Context) { c.JSON(200, statusResponse{Status: "ready"}) })
-	salesnote.RegisterRoutes(engine.Group("/v1", verifier.Middleware()), handler)
+	// Backends render documents with a service token; the console manages the
+	// service with the superadmin token.
+	salesnote.RegisterRoutes(engine.Group("/v1", verifier.Service()), handler)
+	catalog.RegisterRoutes(engine.Group("/v1/admin", verifier.Superadmin()), admin)
 	engine.NoRoute(func(c *gin.Context) { httpserver.Error(c, 404, "not_found", "Route not found.") })
 
 	server := &http.Server{
