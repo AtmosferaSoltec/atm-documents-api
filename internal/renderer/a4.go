@@ -72,6 +72,7 @@ func drawA4(n salesnote.Note, knownPages int) ([]byte, int, error) {
 	pdf.SetAuthor(n.Company.LegalName, true)
 	pdf.SetCreator("ATM-Documents-API", true)
 	pdf.SetCreationDate(n.IssuedAt)
+	pdf.SetModificationDate(n.IssuedAt)
 	a := &a4Doc{c: newCanvas(pdf), n: n, pages: knownPages}
 	pdf.SetHeaderFunc(a.watermarks)
 	pdf.SetFooterFunc(a.footer)

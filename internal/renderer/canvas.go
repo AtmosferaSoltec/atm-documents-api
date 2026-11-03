@@ -98,7 +98,6 @@ func (c *canvas) wrap(text string, first, width float64) []string {
 		}
 		if current != "" {
 			lines = append(lines, current)
-			current = ""
 		}
 		for c.width(word) > limit() {
 			cut := 0
@@ -161,14 +160,6 @@ func (c *canvas) labeled(x, y, w, lh float64, label, value string) float64 {
 		c.line(x, y+float64(i+1)*lh, w, lh, alignLeft, s)
 	}
 	return float64(len(parts)) * lh
-}
-
-// labeledHeight is the height labeled would use, without drawing.
-func (c *canvas) labeledHeight(w, lh float64, label, value string) float64 {
-	c.font(c.size, true)
-	labelWidth := c.width(label)
-	c.font(c.size, false)
-	return float64(len(c.wrap(value, w-labelWidth, w))) * lh
 }
 
 // roundedBox strokes (and optionally fills) a rounded rectangle.

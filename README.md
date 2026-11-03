@@ -2,7 +2,7 @@
 
 Generates PDF documents for the ATM systems. It holds no business data and no database: callers send everything the document needs, and the service answers with the PDF.
 
-Today it renders one document, the **internal sales note** (`NOTA DE VENTA`) that La Vendimia prints, in two formats:
+Today it renders two documents. The **internal sales note** (`NOTA DE VENTA`) that La Vendimia prints, in two formats:
 
 | Format | Paper | Notes |
 |---|---|---|
@@ -22,6 +22,7 @@ cmd/api/                  entry point: wiring only
 internal/config/          environment configuration
 internal/auth/            service-token verification (RS256, public key)
 internal/platform/httpserver/   error envelope, X-Request-ID
+internal/periodreport/    feature: Orbita period report (model + validation, formats, service, handler)
 internal/salesnote/       feature: model + validation, service, handler, formats, amount in words
 internal/renderer/        the ONLY package importing fpdf: A4 and ticket layouts
 ```
@@ -36,7 +37,7 @@ See [.env.example](.env.example). `AUTH_PUBLIC_KEY_BASE64` and `AUTH_ISSUER` are
 | `HTTP_PORT` | `8085` | Listen port |
 | `AUTH_PUBLIC_KEY_BASE64` | | Base64 PEM public key of atm-auth-api |
 | `AUTH_ISSUER` | | Must equal atm-auth-api `JWT_ISSUER` |
-| `ALLOWED_SYSTEMS` | `lavendimia` | System codes whose service token may call the service |
+| `ALLOWED_SYSTEMS` | `lavendimia,orbita` | System codes whose service token may call the service |
 | `MAX_CONCURRENT_RENDERS` | `4` | Documents rendered at once; others wait, then get `503 service_busy` |
 | `RENDER_TIMEOUT` | `15s` | Upper bound for one request |
 
@@ -63,6 +64,7 @@ A missing, malformed, expired or wrongly signed token is always 401.
 | GET | `/health` | Liveness |
 | GET | `/ready` | Readiness (no external dependencies: ready when running) |
 | POST | `/v1/documents/sales-note` | Render a sales note; responds `application/pdf` (service token) |
+| POST | `/v1/documents/period-report` | Render the Orbita period report; responds `application/pdf` (service token of `orbita`) |
 | GET | `/v1/admin/templates` | Catalog of document types, their formats and limits, and the service settings (superadmin) |
 | GET | `/v1/admin/templates/{code}/preview?format=a4\|ticket` | The template rendered with fictional data, as `application/pdf` (superadmin) |
 | GET | `/v1/admin/activity` | What the service rendered since it started (superadmin) |
@@ -107,6 +109,37 @@ A missing, malformed, expired or wrongly signed token is always 401.
 Limits: body 4 MiB; logo 2 MiB and 8 megapixels, PNG or JPEG only; at most 500 items for `a4` (20 pages) and 150 for `ticket`; money values up to 99,999,999.99; the request must finish within `RENDER_TIMEOUT`.
 
 Response headers: `Content-Type: application/pdf`, `Content-Disposition: inline; filename="<code>.pdf"`, `Cache-Control: no-store`, `X-Request-ID`.
+
+### `POST /v1/documents/period-report`
+
+The caller (atm-orbita-api) sends every figure; the service computes nothing. Money values are decimal strings with two decimals, never numbers; percentages are strings with one decimal.
+
+```json
+{
+  "from": "2026-10-01",
+  "to": "2026-10-31",
+  "currencies": [
+    {
+      "currency": "PEN",
+      "income_total": "3200.00",
+      "expense_total": "1954.20",
+      "balance": "1245.80",
+      "expenses": [
+        { "name": "Comida", "total": "700.00", "percent": "35.8" },
+        { "name": "Transporte", "total": "350.00", "percent": "17.9" }
+      ],
+      "incomes": [{ "name": "Sueldo", "total": "3200.00", "percent": "100.0" }]
+    }
+  ]
+}
+```
+
+- `from` and `to` are `YYYY-MM-DD` dates (inclusive, at most 366 days, years 2000-2100).
+- `currency` is a 3-letter uppercase code, no repeats: `S/` for `PEN`, `US$` for `USD`, otherwise the code (`EUR 1,245.80`).
+- `income_total`, `expense_total` and row `total`: `^\d{1,8}\.\d{2}$`. `balance` may be negative (`-15.00`). `percent`: `0.0` to `100.0`.
+- Limits: 1 to 12 currencies; at most 50 rows in each ranking; names 1-80 characters; body 512 KiB; at most 40 pages; the request must finish within `RENDER_TIMEOUT`. Unknown JSON fields are rejected.
+- The PDF has the period in the header, one block per currency and the footer "Generado por Orbita". Dates and amounts print as `2 oct 2026`, `S/ 1,245.80`, `37.2%`.
+- Response headers: `Content-Type: application/pdf`, `Content-Disposition: inline; filename="orbita-<from>_<to>.pdf"` (built only from the validated dates), `Cache-Control: no-store`, `X-Request-ID`. Errors are the same as the sales note. It counts in `/v1/admin/activity` (template `period-report`, format `a4`, items = ranking rows) but is not in the console catalog or preview yet.
 
 ### Errors
 
@@ -169,7 +202,7 @@ On the server (already prepared):
 | Public site | `https://documents.atmosferast.com` via host nginx, wildcard certificate `/etc/ssl/atmosferast/origin.pem` |
 | Internal URL | `http://documents-api:8085` on the `atm-network` Docker network |
 
-The nginx site is versioned in [deploy/host-nginx/documents.atmosferast.com](deploy/host-nginx/documents.atmosferast.com); it is installed once in `/etc/nginx/sites-available` and linked from `sites-enabled`. The console needs one more block, [console-documents-api.location](deploy/host-nginx/console-documents-api.location), added by hand inside the `server` block of `/etc/nginx/sites-available/console.atmosferast.com` before `location /` (then `nginx -t && systemctl reload nginx`). The production `.env` carries the same `AUTH_PUBLIC_KEY_BASE64` and `AUTH_ISSUER` as storage-api. To let another system call this service, add its code to `ALLOWED_SYSTEMS` in that file and restart the container.
+The nginx site is versioned in [deploy/host-nginx/documents.atmosferast.com](deploy/host-nginx/documents.atmosferast.com); it is installed once in `/etc/nginx/sites-available` and linked from `sites-enabled`. The console needs one more block, [console-documents-api.location](deploy/host-nginx/console-documents-api.location), added by hand inside the `server` block of `/etc/nginx/sites-available/console.atmosferast.com` before `location /` (then `nginx -t && systemctl reload nginx`). The production `.env` carries the same `AUTH_PUBLIC_KEY_BASE64` and `AUTH_ISSUER` as storage-api. To let another system call this service, add its code to `ALLOWED_SYSTEMS` in that file (the production `.env` must list `orbita` before atm-orbita-api can call `POST /v1/documents/period-report`) and restart the container.
 
 Backends on the same Docker network should call `http://documents-api:8085`; the public domain exists for tools and external callers.
 

@@ -75,6 +75,7 @@ func drawTicket(n salesnote.Note, pageHeight float64) ([]byte, float64, error) {
 	pdf.SetAuthor(n.Company.LegalName, true)
 	pdf.SetCreator("ATM-Documents-API", true)
 	pdf.SetCreationDate(n.IssuedAt)
+	pdf.SetModificationDate(n.IssuedAt)
 	pdf.AddPageFormat("P", fpdf.SizeType{Wd: ticketWidth, Ht: pageHeight})
 	t := &ticketDoc{c: newCanvas(pdf), n: n, y: ticketPadY}
 	t.c.textColor(black)

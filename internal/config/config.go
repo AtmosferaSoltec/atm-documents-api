@@ -31,7 +31,7 @@ func Load() (Config, error) {
 		MaxConcurrentRenders: 4,
 		RenderTimeout:        15 * time.Second,
 	}
-	for _, system := range strings.Split(value("ALLOWED_SYSTEMS", "lavendimia"), ",") {
+	for _, system := range strings.Split(value("ALLOWED_SYSTEMS", "lavendimia,orbita"), ",") {
 		if system = strings.TrimSpace(system); system != "" {
 			c.AllowedSystems = append(c.AllowedSystems, system)
 		}

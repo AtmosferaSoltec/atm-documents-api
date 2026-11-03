@@ -15,6 +15,7 @@ import (
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/auth"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/catalog"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/config"
+	"github.com/AtmosferaSoltec/atm-documents-api/internal/periodreport"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/platform/httpserver"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/renderer"
 	"github.com/AtmosferaSoltec/atm-documents-api/internal/salesnote"
@@ -52,6 +53,8 @@ func run(ctx context.Context, logger *slog.Logger, args []string) error {
 	service := salesnote.NewService(renderer.New(), cfg.MaxConcurrentRenders)
 	recorder := activity.New()
 	handler := salesnote.NewHandler(service, recorder, cfg.RenderTimeout, logger)
+	reportHandler := periodreport.NewHandler(
+		periodreport.NewService(renderer.NewPeriodReport(), cfg.MaxConcurrentRenders), recorder, cfg.RenderTimeout, logger)
 	admin := catalog.NewHandler(service, recorder, catalog.Settings{
 		Environment:          cfg.Environment,
 		AllowedSystems:       cfg.AllowedSystems,
@@ -84,6 +87,7 @@ func run(ctx context.Context, logger *slog.Logger, args []string) error {
 	// Backends render documents with a service token; the console manages the
 	// service with the superadmin token.
 	salesnote.RegisterRoutes(engine.Group("/v1", verifier.Service()), handler)
+	periodreport.RegisterRoutes(engine.Group("/v1", verifier.Service()), reportHandler)
 	catalog.RegisterRoutes(engine.Group("/v1/admin", verifier.Superadmin()), admin)
 	engine.NoRoute(func(c *gin.Context) { httpserver.Error(c, 404, "not_found", "Route not found.") })
 
